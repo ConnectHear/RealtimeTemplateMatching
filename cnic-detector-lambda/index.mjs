@@ -1,26 +1,27 @@
-const fs = require('fs');
-const path = require('path');
-const cv = require('opencv-wasm');
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import cv from 'opencv-wasm';
 
-// --- Global variables to hold initialized template data ---
-// This is done outside the handler to take advantage of Lambda's execution context reuse (warm starts)
+// ES Module equivalent for __dirname, which is not available in ES Modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Global variables to hold initialized template data for reuse in "warm" Lambda starts
 let templateMat, templateKeypoints, templateDescriptors, orb, bfMatcher;
 let isInitialized = false;
 
-// --- Initialization Function ---
+// Initialization function runs only once per container
 async function initialize() {
     if (isInitialized) {
         return;
     }
-
-    // Wait for OpenCV to be ready
     await cv.init();
     console.log('OpenCV.js is ready.');
 
-    // Load the template image from the file packaged with the Lambda
     const templateImagePath = path.join(__dirname, 'template.png');
     const templateImageBuffer = fs.readFileSync(templateImagePath);
-    templateMat = cv.imdecode(templateImageBuffer); // Use imdecode for buffers
+    templateMat = cv.imdecode(templateImageBuffer);
 
     if (templateMat.empty()) {
         throw new Error('Failed to load template image.');
@@ -29,7 +30,6 @@ async function initialize() {
     const templateGray = new cv.Mat();
     cv.cvtColor(templateMat, templateGray, cv.COLOR_RGBA2GRAY);
 
-    // Initialize ORB detector and BFMatcher
     orb = new cv.ORB(5000);
     templateKeypoints = new cv.KeyPointVector();
     templateDescriptors = new cv.Mat();
@@ -46,23 +46,27 @@ async function initialize() {
     isInitialized = true;
 }
 
-// --- Main Lambda Handler ---
-exports.handler = async (event) => {
+// Main Lambda handler function
+export const handler = async (event) => {
     try {
-        // Ensure OpenCV and our template data are initialized
-        await initialize();
+        await initialize(); // Ensure everything is ready
 
-        // Get the base64 encoded image from the request body
         if (!event.body) {
             throw new Error("Request body is empty.");
         }
+
         const body = JSON.parse(event.body);
-        const imageBase64 = body.image;
+        let imageBase64 = body.image;
+
         if (!imageBase64) {
             throw new Error("No 'image' field in request body.");
         }
 
-        // Decode the image
+        // Robustly handle if the input is a Data URL (e.g., from a browser)
+        if (imageBase64.includes(';base64,')) {
+            imageBase64 = imageBase64.split(',')[1];
+        }
+
         const imageBuffer = Buffer.from(imageBase64, 'base64');
         const frame = cv.imdecode(imageBuffer);
         if (frame.empty()) {
@@ -77,7 +81,7 @@ exports.handler = async (event) => {
         orb.detectAndCompute(frameGray, new cv.Mat(), keypoints2, descriptors2);
 
         let templateDetected = false;
-        const matchThreshold = 12; // Minimum good matches to consider it a detection
+        const matchThreshold = 12; // Minimum good matches to count as a detection
 
         if (!descriptors2.empty()) {
             const goodMatchesVector = new cv.DMatchVector();
@@ -89,7 +93,7 @@ exports.handler = async (event) => {
             goodMatchesVector.delete();
         }
 
-        // Cleanup OpenCV Mats
+        // Clean up OpenCV Mats to prevent memory leaks
         frame.delete();
         frameGray.delete();
         keypoints2.delete();
@@ -104,7 +108,6 @@ exports.handler = async (event) => {
                 detected: templateDetected,
             }),
         };
-
     } catch (error) {
         console.error('ERROR:', error);
         return {
